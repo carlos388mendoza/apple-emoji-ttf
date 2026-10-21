@@ -10,3 +10,7 @@ output/
 
 # Debug screenshots from font render test
 tests/results/
+dl/
+dl2/
+output/
+input/
