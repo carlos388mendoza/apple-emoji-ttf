@@ -34,9 +34,7 @@ jobs:
       - name: Download the emoji catalog of the app
         run: |
           curl -fL -o input/emojis-es.json \
-            "https://raw.githubusercontent.com/vbgjptt89g-beep/wiki-en-equipo/main/frontend/public/iconos/emojis-es.json" \
-            || curl -fL -o input/emojis-es.json \
-            "https://raw.githubusercontent.com/carlos388mendoza/wiki-en-equipo/main/frontend/public/iconos/emojis-es.json"
+            "https://wiki-grupo-comidas.vercel.app/iconos/emojis-es.json"
           ls -la input/emojis-es.json
 
       - name: Inspect the font
