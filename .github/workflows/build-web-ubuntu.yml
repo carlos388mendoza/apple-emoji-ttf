@@ -30,7 +30,7 @@ jobs:
           ls -la input
 
       - name: Split into unicode-range chunks + CSS
-        run: python tools/build_web_chunks.py input/AppleColorEmoji.ttf output 480
+        run: python tools/build_web_chunks.py input/AppleColorEmoji.ttf output 1500
 
       - name: List output
         run: ls -la output | head -40
