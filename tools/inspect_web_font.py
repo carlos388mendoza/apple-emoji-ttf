@@ -17,7 +17,8 @@ def describe(path: str) -> None:
     print(f"== {path}")
     print(f"  tablas: {', '.join(sorted(font.keys()))}")
     print(f"  upem: {font['head'].unitsPerEm}")
-    print(f"  cmap: {len(font.getBestCmap() or {})}")
+    cmap = font.getBestCmap() or {}
+    print(f"  cmap: {len(cmap)}")
     order = font.getGlyphOrder()
     print(f"  glifos: {len(order)}  (muestra: {', '.join(order[1:6])})")
     seq = [g for g in order if g.startswith("seq.")]
@@ -31,29 +32,37 @@ def describe(path: str) -> None:
         print(f"  ligaduras GSUB: {total}")
     else:
         print("  ligaduras GSUB: sin tabla")
-    if "morx" in font:
-        print("  morx: si")
+    print(f"  morx: {'si' if 'morx' in font else 'no'}")
     hmtx = font["hmtx"].metrics
     print(f"  hhea: ascent={font['hhea'].ascent} descent={font['hhea'].descent} lineGap={font['hhea'].lineGap}")
     os2 = font["OS/2"]
-    print(f"  OS/2: winAscent={os2.usWinAscent} winDescent={os2.usWinDescent} typo={os2.sTypoAscender}/{os2.sTypoDescender} fsType={os2.fsType}")
-    for name in ("uni1F600", "uni1F468", "uni263A"):
-        if name in hmtx:
-            print(f"  avance {name}: {hmtx[name][0]}")
+    print(
+        f"  OS/2: winAscent={os2.usWinAscent} winDescent={os2.usWinDescent} "
+        f"typo={os2.sTypoAscender}/{os2.sTypoDescender} fsType={os2.fsType}"
+    )
+    for cp in (0x1F600, 0x1F468, 0x263A, 0x1F3FB):
+        name = cmap.get(cp)
+        if name and name in hmtx:
+            print(f"  U+{cp:04X} ({name}): avance={hmtx[name][0]}")
     print(f"  familia: {font['name'].getDebugName(1)} | subfamilia: {font['name'].getDebugName(2)}")
-    if "CBDT" in font:
-        cbdt = font["CBDT"].strikeData
-        print(f"  CBDT strikes: {sorted(cbdt.keys())}")
-        for ppem in sorted(cbdt.keys())[:3]:
-            strike = cbdt[ppem]
+    try:
+        data = font["CBDT"].strikeData
+        print(f"  CBDT strikes: {len(data)}")
+        for strike in data[:4]:
+            size = getattr(strike, "bitmapSizeTable", None)
+            ppem = getattr(size, "ppemX", "?")
+            glifos = getattr(strike, "bitmapGlyphs", {}) or {}
             muestra = []
-            for name in ("uni1F600", "uni1F468"):
-                g = strike.get(name)
+            for cp in (0x1F600, 0x1F468):
+                name = cmap.get(cp)
+                g = glifos.get(name) if name else None
                 if g is None:
                     continue
                 m = g.metrics
-                muestra.append(f"{name}: alto={m.height} ancho={m.width} bearing=({m.BearingX},{m.BearingY}) avance={m.Advance}")
+                muestra.append(f"{name}: {m.width}x{m.height} bearing=({m.BearingX},{m.BearingY}) advance={m.Advance}")
             print(f"    {ppem}px -> {' | '.join(muestra) or 'sin muestra'}")
+    except Exception as exc:  # pragma: no cover - solo diagnostico
+        print(f"  CBDT: no se pudo leer ({exc})")
     font.close()
 
 
