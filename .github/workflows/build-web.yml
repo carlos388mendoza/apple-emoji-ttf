@@ -1,0 +1,36 @@
+name: Build web font
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v2]
+    paths:
+      - ".github/workflows/build-web.yml"
+
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build web font
+        run: python cli.py -c configs/web.yaml --output output/AppleColorEmoji.ttf
+
+      - name: List output
+        run: ls -la output
+
+      - name: Upload web artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: apple-emoji-web
+          path: output/
+          retention-days: 5
