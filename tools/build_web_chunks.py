@@ -10,21 +10,27 @@ What this script does:
 
 1. reads the PNGs of the wanted strikes (96 px by default, the same single strike the
    published web build uses) straight from the source CBDT/CBLC tables,
-2. groups the codepoints into budget-sized chunks (same idea as ``web/split.py``),
-   keeping in every chunk the shared codepoints (ZWJ, VS16, skin tones) and the
-   components of the sequences that start there,
+2. groups the codepoints into chunks (same idea as ``web/split.py``), but keeping
+   together all the codepoints that take part in the same emoji sequence,
 3. subsets the source font for every chunk (the GSUB ligatures survive) and rebuilds
    CBDT/CBLC with only the wanted strikes,
 4. writes the chunks as WOFF2 plus the matching ``@font-face`` CSS.
 
-Two details matter for the sequences to be drawn as a single glyph:
+Three details matter for the sequences to be drawn as a single glyph:
 
 * the ``unicode-range`` of a chunk only lists *its own* codepoints (plus the shared
-  ones). The components of the sequences stay in the chunk's cmap but outside its
-  range, otherwise the browser could pick another chunk as the primary font of the
-  sequence and the ligature would never be applied;
+  ones), so a codepoint never resolves to two different chunks;
+* all the codepoints of a sequence live in the *same* chunk (they are grouped by
+  connected components of the sequence graph). Otherwise the browser splits the
+  sequence in two text runs, the ligature is never applied and the emoji is drawn
+  as several loose glyphs (or with the system emoji font);
 * a ligature whose composed glyph has no bitmap is dropped, otherwise the browser
   would draw an empty box.
+
+The skin tone modifiers are left out of the font on purpose: the browser can only
+use one font per codepoint and the tone is shared by every chunk, so the sequence
+(base + tone) would always be split. Without them the whole sequence is drawn by
+the system emoji font, which knows how to compose it.
 
 The ligatures can be limited to the sequences that the app really uses (the emoji
 catalogue) with ``--catalog``; the rest of the sequences then keep using the system
@@ -52,8 +58,17 @@ from tables.cbdt_cblc import (  # noqa: E402
 )
 from tables.raw import add_raw_table  # noqa: E402
 
-# Codepoints compartidos por muchas secuencias: van en todos los trozos.
-SHARED_CPS = {0x200D, 0xFE0F, 0x200C} | set(range(0x1F3FB, 0x1F400))
+# Codepoints compartidos por muchas secuencias: van en todos los trozos. Son
+# invisibles o no cambian de fuente (el navegador no parte la secuencia al pasar
+# de un codepoint invisible a otro), asi que no rompen la ligadura.
+SHARED_CPS = {0x200D, 0xFE0F, 0x200C}
+
+# Tonos de piel: NO van en la fuente. El navegador solo puede usar un codepoint
+# con una fuente a la vez, y como el tono esta en todos los trozos, la secuencia
+# (base + tono) se partiria en dos textos y saldria como dos glifos sueltos. Sin
+# el tono en la fuente, la secuencia la dibuja entera la fuente del sistema
+# (que si sabe componerla), que es como se ve hoy en la web.
+TONE_CPS = set(range(0x1F3FB, 0x1F400))
 
 # Metricas verticales de la build de Linux (las mismas que usa hoy la web), para que
 # el emoji no se mueva respecto a la version ya publicada.
@@ -184,59 +199,99 @@ def unicode_range(cps: set[int]) -> str:
     return ", ".join(parts)
 
 
-def group_codepoints(
+def plan_chunks(
     base_cps: list[int],
     cmap: dict[int, str],
-    comp_map: dict[str, set[str]],
-    res_map: dict[str, set[str]],
+    rev_cmap: dict[str, set[int]],
+    rules: dict[tuple[str, tuple[str, ...]], str],
     glyph_cost: dict[str, int],
     budget_bytes: int,
 ) -> list[list[int]]:
-    """Agrupa los codepoints en trozos que no pasan del presupuesto."""
+    """Agrupa los codepoints en trozos disjuntos.
+
+    Los codepoints de una misma secuencia (👨‍👩‍👧, 🧑‍🚀, 🇲🇽…) tienen que caer en el
+    MISMO trozo: el navegador elige una fuente por codepoint, asi que si la
+    secuencia cae en dos trozos distintos la parte en dos textos, la ligadura no
+    se aplica y el emoji sale como varios glifos sueltos (o con la fuente del
+    sistema). Por eso se agrupan por componentes conexas del grafo de secuencias:
+    todos los codepoints que aparecen juntos en alguna secuencia se quedan
+    juntos.
+    """
     avg = max(1, sum(glyph_cost.values()) // max(len(glyph_cost), 1))
 
     def cost(names: set[str]) -> int:
         return sum(glyph_cost.get(n, avg) for n in names)
 
-    shared_active: set[str] = set()
-    for cp in SHARED_CPS:
-        name = cmap.get(cp)
-        if not name:
-            continue
-        shared_active.add(name)
-        shared_active |= comp_map.get(name, set())
-        shared_active |= res_map.get(name, set())
+    # Componentes conexas sobre los glifos que aparecen en alguna secuencia.
+    parent: dict[str, str] = {}
 
-    shared_cost = cost(shared_active)
+    def find(name: str) -> str:
+        parent.setdefault(name, name)
+        while parent[name] != name:
+            parent[name] = parent[parent[name]]
+            name = parent[name]
+        return name
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for first, components in rules:
+        find(first)
+        for comp in components:
+            union(first, comp)
+
+    grupos: dict[str, set[str]] = {}
+    for name in list(parent):
+        root = find(name)
+        grupos.setdefault(root, set()).add(name)
+
+    # Los codepoints de cada grupo y su coste (los glifos y los resultados).
+    unidades: list[tuple[set[int], set[str], int]] = []
+    usados: set[int] = set()
+    for names in grupos.values():
+        cps: set[int] = set()
+        for name in names:
+            cps |= rev_cmap.get(name, set())
+        cps = {cp for cp in cps if cp in cmap and cp not in SHARED_CPS}
+        if not cps:
+            continue
+        usados |= cps
+        extra = {
+            result
+            for (first, components), result in rules.items()
+            if first in names and all(c in names for c in components)
+        }
+        unidades.append((cps, names | extra, cost(names | extra)))
+
+    sueltos = [cp for cp in base_cps if cp not in usados]
+    for cp in sueltos:
+        name = cmap.get(cp)
+        nombres = {name} if name else set()
+        unidades.append(({cp}, nombres, cost(nombres)))
+
+    # Los grupos grandes (familias, banderas) van solos; los sueltos se rellenan
+    # hasta el presupuesto.
+    unidades.sort(key=lambda u: -u[2])
     bitmap_budget = max(budget_bytes - OVERHEAD_ESTIMATE, 64 * 1024)
 
     chunks: list[list[int]] = []
-    current: list[int] = []
-    active = set(shared_active)
-    current_cost = shared_cost
+    actual: list[int] = []
+    actual_coste = 0
+    for cps, _nombres, coste in unidades:
+        if actual and (actual_coste + coste) > bitmap_budget:
+            chunks.append(actual)
+            actual = []
+            actual_coste = 0
+        actual.extend(cps)
+        actual_coste += coste
+    if actual:
+        chunks.append(actual)
 
-    for cp in base_cps:
-        name = cmap.get(cp)
-        new_names: set[str] = set()
-        if name:
-            new_names = {name} | comp_map.get(name, set()) | res_map.get(name, set())
-        new_names -= active
-        new_cost = cost(new_names)
-
-        if current and (current_cost + new_cost) > bitmap_budget:
-            chunks.append(current)
-            current = []
-            active = set(shared_active)
-            current_cost = shared_cost
-            new_names -= active
-            new_cost = cost(new_names)
-
-        current.append(cp)
-        active |= new_names
-        current_cost += new_cost
-
-    if current:
-        chunks.append(current)
+    for chunk in chunks:
+        chunk.sort()
+    chunks.sort(key=lambda c: c[0])
     return chunks
 
 
@@ -464,10 +519,12 @@ def main() -> int:
         name: sum(len(png) for png in per_strike.values()) for name, per_strike in pngs.items()
     }
 
-    base_cps = sorted(cp for cp in cmap if cp not in SHARED_CPS and cp >= 0x2000)
+    base_cps = sorted(
+        cp for cp in cmap if cp not in SHARED_CPS and cp not in TONE_CPS and cp >= 0x2000
+    )
     print(f"Codepoints de emoji: {len(base_cps)}")
 
-    chunks = group_codepoints(base_cps, cmap, comp_map, res_map, glyph_cost, budget)
+    chunks = plan_chunks(base_cps, cmap, rev_cmap, rules, glyph_cost, budget)
     print(f"Trozos: {len(chunks)}")
 
     css = [

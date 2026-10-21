@@ -10,8 +10,10 @@ Para cada trozo comprueba que:
 
 Ademas, para el catalogo de emojis de la app, comprueba que cada secuencia
 multi-codepoint queda compuesta por un unico glifo: para eso busca el trozo que
-cubre el primer codepoint y verifica que ese trozo tiene la ligadura, el glifo
-compuesto con su bitmap y todos los componentes en su cmap.
+cubre *todos* sus codepoints (tiene que ser el mismo, si no el navegador parte
+la secuencia) y verifica que ese trozo tiene la ligadura, el glifo compuesto con
+su bitmap y todos los componentes en su cmap. Tambien comprueba que ningun
+codepoint este en dos trozos a la vez.
 
 Uso:
     python tools/verify_web_chunks.py output [--catalog input/emojis-es.json]
@@ -134,6 +136,20 @@ def main() -> int:
             f"strikes {trozo.strikes()}, {trozo.path.stat().st_size // 1024} KB"
         )
 
+    # Un codepoint no puede estar en dos trozos: el navegador eligeria otro y la
+    # secuencia se partiria. Los compartidos (ZWJ, VS16) si pueden estar en todos.
+    COMPARTIDOS = {0x200C, 0x200D, 0xFE0F}
+    duplos: dict[int, list[str]] = {}
+    for trozo in trozos:
+        for cp in trozo.cps - COMPARTIDOS:
+            duplos.setdefault(cp, []).append(trozo.path.name)
+    for cp, archivos in duplos.items():
+        fallos.append(
+            f"U+{cp:04X} esta en varios trozos: {', '.join(archivos)}"
+        )
+    if duplos:
+        print(f"Codepoints en mas de un trozo: {len(duplos)}")
+
     if args.catalog:
         data = json.loads(Path(args.catalog).read_text(encoding="utf-8"))
         items = data.get("emojis", data) if isinstance(data, dict) else data
@@ -154,10 +170,14 @@ def main() -> int:
                 # proposito: la fuente del sistema los dibuja mejor.
                 delegadas += 1
                 continue
-            trozo = next((t for t in trozos if t.cubre(seq[0])), None)
-            if trozo is None:
+            # Todos los codepoints de la secuencia tienen que caer en el mismo
+            # trozo: si no, el navegador la parte en dos textos y la ligadura no
+            # se aplica (el emoji sale como varios glifos sueltos).
+            candidatos = [t for t in trozos if all(t.cubre(cp) for cp in seq)]
+            if not candidatos:
                 sin_componer.append(seq)
                 continue
+            trozo = candidatos[0]
             nombres = [trozo.cmap.get(cp) for cp in seq]
             if any(n is None for n in nombres):
                 sin_componer.append(seq)
