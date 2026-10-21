@@ -6,6 +6,7 @@ on:
     branches: [v2]
     paths:
       - ".github/workflows/build-web-ubuntu.yml"
+      - "tools/build_web_chunks.py"
 
 jobs:
   build:
