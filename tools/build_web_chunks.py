@@ -280,6 +280,34 @@ def apply_metrics(font: TTFont) -> None:
         os2.usWinDescent = 0
 
 
+def drop_ligatures_without_bitmap(font: TTFont, con_bitmap: set[str]) -> int:
+    """Quita las ligaduras cuyo glifo compuesto no tiene bitmap.
+
+    La fuente de Apple trae la regla (por ejemplo U+2642 + U+FE0F) pero no el
+    bitmap del resultado: si la regla se queda, el navegador dibuja un recuadro
+    vacio. Sin la regla, esa secuencia la dibuja la fuente del sistema.
+    """
+    if "GSUB" not in font:
+        return 0
+    gsub = font["GSUB"].table
+    quitadas = 0
+    for lookup in gsub.LookupList.Lookup:
+        if lookup.LookupType != 4:
+            continue
+        for subtable in lookup.SubTable:
+            ligatures = getattr(subtable, "ligatures", None)
+            if not ligatures:
+                continue
+            for primero in list(ligatures):
+                keep = [lig for lig in ligatures[primero] if lig.LigGlyph in con_bitmap]
+                quitadas += len(ligatures[primero]) - len(keep)
+                if keep:
+                    ligatures[primero] = keep
+                else:
+                    del ligatures[primero]
+    return quitadas
+
+
 def build_chunk(
     source: Path,
     range_cps: set[int],
@@ -318,6 +346,9 @@ def build_chunk(
     subsetter = Subsetter(options=options)
     subsetter.populate(unicodes=sorted(range_cps), glyphs=sorted(active_names))
     subsetter.subset(font)
+
+    con_bitmap = {name for name in active_names if name in pngs}
+    drop_ligatures_without_bitmap(font, con_bitmap)
 
     set_names(font)
     apply_metrics(font)

@@ -145,8 +145,11 @@ def main() -> int:
         compuestas = 0
         delegadas = 0
         sin_componer = []
+        # La fuente de Apple no trae el bitmap de la variante con VS16 de estos
+        # simbolos: se dibujan con la fuente del sistema (igual que antes).
+        sin_variante_apple = {0x2640, 0x2642, 0x2695}
         for seq in secuencias:
-            if seq[0] < 0x2000:
+            if seq[0] < 0x2000 or seq[0] in sin_variante_apple:
                 # Por debajo de U+2000 (teclas, digitos, copyright) no entramos a
                 # proposito: la fuente del sistema los dibuja mejor.
                 delegadas += 1
