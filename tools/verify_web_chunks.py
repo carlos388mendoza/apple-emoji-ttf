@@ -143,8 +143,14 @@ def main() -> int:
             if isinstance(valor, str) and len(valor) > 1:
                 secuencias.append(tuple(ord(c) for c in valor))
         compuestas = 0
+        delegadas = 0
         sin_componer = []
         for seq in secuencias:
+            if seq[0] < 0x2000:
+                # Por debajo de U+2000 (teclas, digitos, copyright) no entramos a
+                # proposito: la fuente del sistema los dibuja mejor.
+                delegadas += 1
+                continue
             trozo = next((t for t in trozos if t.cubre(seq[0])), None)
             if trozo is None:
                 sin_componer.append(seq)
@@ -159,8 +165,9 @@ def main() -> int:
             else:
                 sin_componer.append(seq)
         print(
-            f"Catalogo: {compuestas}/{len(secuencias)} secuencias multi-codepoint "
-            f"quedan compuestas por un solo glifo"
+            f"Catalogo: {compuestas}/{len(secuencias) - delegadas} secuencias "
+            f"multi-codepoint quedan compuestas por un solo glifo "
+            f"({delegadas} delegadas a la fuente del sistema)"
         )
         for seq in sin_componer[:20]:
             print(f"  sin componer: {' '.join(f'{cp:04X}' for cp in seq)}")

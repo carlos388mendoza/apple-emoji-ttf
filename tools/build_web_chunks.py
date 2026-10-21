@@ -8,14 +8,23 @@ fell back to the system emoji font and the icon picker mixed two different style
 
 What this script does:
 
-1. reads the PNGs of the wanted strikes (32 and 96 px by default) straight from the
-   source CBDT/CBLC tables,
+1. reads the PNGs of the wanted strikes (96 px by default, the same single strike the
+   published web build uses) straight from the source CBDT/CBLC tables,
 2. groups the codepoints into budget-sized chunks (same idea as ``web/split.py``),
    keeping in every chunk the shared codepoints (ZWJ, VS16, skin tones) and the
    components of the sequences that start there,
 3. subsets the source font for every chunk (the GSUB ligatures survive) and rebuilds
    CBDT/CBLC with only the wanted strikes,
 4. writes the chunks as WOFF2 plus the matching ``@font-face`` CSS.
+
+Two details matter for the sequences to be drawn as a single glyph:
+
+* the ``unicode-range`` of a chunk only lists *its own* codepoints (plus the shared
+  ones). The components of the sequences stay in the chunk's cmap but outside its
+  range, otherwise the browser could pick another chunk as the primary font of the
+  sequence and the ligature would never be applied;
+* a ligature whose composed glyph has no bitmap is dropped, otherwise the browser
+  would draw an empty box.
 
 The ligatures can be limited to the sequences that the app really uses (the emoji
 catalogue) with ``--catalog``; the rest of the sequences then keep using the system
@@ -346,7 +355,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", help="TTF de origen (build de Windows del release)")
     parser.add_argument("outdir", help="carpeta de salida")
-    parser.add_argument("--ppem", default="32,96", help="strikes a incluir (por defecto 32,96)")
+    parser.add_argument("--ppem", default="96", help="strikes a incluir (por defecto 96)")
     parser.add_argument("--budget-kb", type=int, default=700, help="tamano objetivo por trozo")
     parser.add_argument("--catalog", default="", help="catalogo de emojis para podar ligaduras")
     args = parser.parse_args()
@@ -390,12 +399,6 @@ def main() -> int:
             print("Aviso: ninguna ligadura del catalogo; se usan todas", file=sys.stderr)
             rules = all_rules
 
-    comp_map: dict[str, set[str]] = {}
-    res_map: dict[str, set[str]] = {}
-    for (first, components), result in rules.items():
-        comp_map.setdefault(first, set()).update([first, *components])
-        res_map.setdefault(first, set()).add(result)
-
     # PNGs de los strikes que nos interesan.
     cblc_data = font.reader["CBLC"]
     cbdt_data = font.reader["CBDT"]
@@ -407,6 +410,23 @@ def main() -> int:
                 continue
             pngs.setdefault(glyph_order[gid], {})[ppem] = png
         print(f"Strike {ppem}px: {len(strike)} glifos")
+
+    # Una ligadura sin glifo compuesto dibujaria un emoji en blanco: mejor quitarla
+    # y que el navegador use la fuente del sistema para esa secuencia.
+    sin_bitmap = {key for key, result in rules.items() if result not in pngs}
+    if sin_bitmap:
+        print(
+            f"Ligaduras sin glifo compuesto (se descartan): {len(sin_bitmap)}",
+            file=sys.stderr,
+        )
+        rules = {key: result for key, result in rules.items() if key not in sin_bitmap}
+
+    comp_map: dict[str, set[str]] = {}
+    res_map: dict[str, set[str]] = {}
+    for (first, components), result in rules.items():
+        comp_map.setdefault(first, set()).update([first, *components])
+        res_map.setdefault(first, set()).add(result)
+
     font.close()
 
     glyph_cost = {
@@ -425,15 +445,23 @@ def main() -> int:
     ]
     total = 0
     for index, chunk in enumerate(chunks, start=1):
-        range_cps: set[int] = set(chunk) | SHARED_CPS
+        # Rango propio del trozo: sus codepoints y los compartidos. Es lo que ve el
+        # navegador. Los componentes de las secuencias se quedan en el cmap del
+        # trozo pero FUERA de su unicode-range: asi el navegador elige siempre este
+        # trozo como fuente principal de la secuencia y la ligadura se aplica (si el
+        # rango se solapara, otro trozo podria ganar y la secuencia se deshacia).
+        own_cps: set[int] = set(chunk) | SHARED_CPS
+        # Rango ampliado: incluye los componentes que necesitan las ligaduras de este
+        # trozo, para que el subconjunto contenga el cmap y los glifos que hacen falta.
+        ext_cps: set[int] = set(own_cps)
         for cp in chunk:
             name = cmap.get(cp)
             if name and name in comp_map:
                 for comp_name in comp_map[name]:
-                    range_cps |= rev_cmap.get(comp_name, set())
+                    ext_cps |= rev_cmap.get(comp_name, set())
 
-        range_names = {cmap[cp] for cp in range_cps if cp in cmap}
-        active: set[str] = set(range_names)
+        ext_names = {cmap[cp] for cp in ext_cps if cp in cmap}
+        active: set[str] = set(ext_names)
         for cp in set(chunk) | SHARED_CPS:
             name = cmap.get(cp)
             if name:
@@ -442,16 +470,16 @@ def main() -> int:
         results = 0
         for (first, components), result in rules.items():
             names = [first, *components]
-            if all(name in range_names for name in names):
+            if all(name in ext_names for name in names):
                 active.add(result)
                 results += 1
 
-        data = build_chunk(source, range_cps, active, pngs, ppems, metrics)
+        data = build_chunk(source, ext_cps, active, pngs, ppems, metrics)
         filename = f"AppleColorEmoji[{index}].woff2"
         (outdir / filename).write_bytes(data)
         total += len(data)
         print(
-            f"Trozo {index}: {len(chunk)} cps (+{len(range_cps) - len(chunk)} compartidos), "
+            f"Trozo {index}: {len(chunk)} cps (+{len(own_cps) - len(chunk)} compartidos), "
             f"{results} ligaduras, {len(active)} glifos -> {filename} ({len(data) // 1024} KB)"
         )
 
@@ -462,7 +490,7 @@ def main() -> int:
             "  font-weight: 400;",
             "  font-display: swap;",
             f"  src: url('./{filename}') format('woff2');",
-            f"  unicode-range: {unicode_range(range_cps)};",
+            f"  unicode-range: {unicode_range(own_cps)};",
             "}",
             "",
         ]
