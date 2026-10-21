@@ -70,6 +70,24 @@ def read_ligatures(font: TTFont) -> dict[str, list[tuple[list[str], str]]]:
     return out
 
 
+def set_names(font: TTFont) -> None:
+    """La fuente de Windows se llama "Segoe UI Emoji"; para la web se renombra a Apple Color Emoji."""
+    name = font["name"]
+    for record in list(name.names):
+        name.removeNames(nameID=record.nameID, platformID=record.platformID, platEncID=record.platEncID, langID=record.langID)
+    valores = {
+        0: "Apple Color Emoji (web build, generated from the macOS release). Not redistributable.",
+        1: "Apple Color Emoji",
+        2: "Regular",
+        3: "Apple Color Emoji:Regular",
+        4: "Apple Color Emoji",
+        5: "Version 1.000",
+        6: "AppleColorEmoji-Regular",
+    }
+    for name_id, value in valores.items():
+        name.setName(value, name_id, 3, 1, 0x409)
+
+
 def main() -> int:
     src = Path(sys.argv[1])
     outdir = Path(sys.argv[2])
@@ -127,6 +145,7 @@ def main() -> int:
         chunk_cps = sorted(set(cps) | set(SHARED_CPS) | extra)
 
         f = TTFont(src, lazy=False)
+        set_names(f)
         opts = Options()
         opts.layout_features = ["*"]
         opts.layout_closure = True

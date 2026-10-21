@@ -7,6 +7,7 @@ on:
     paths:
       - ".github/workflows/build-web-ubuntu.yml"
       - "tools/build_web_chunks.py"
+      - "tools/inspect_web_font.py"
 
 jobs:
   build:
@@ -23,15 +24,20 @@ jobs:
       - name: Install fonttools + brotli
         run: pip install "fonttools[woff]" brotli
 
-      - name: Download released Apple Color Emoji (Linux) TTF
+      - name: Download released Apple Color Emoji TTF (Linux and Windows)
         run: |
           mkdir -p input output
-          curl -fL -o input/AppleColorEmoji.ttf \
-            "https://github.com/samuelngs/apple-emoji-ttf/releases/download/macos-26-20260218-d5729b24/AppleColorEmoji-Linux.ttf"
+          curl -fL -o input/AppleColorEmoji-Linux.ttf \
+            "https://github.com/samuelngs/apple-emoji-ttf/releases/download/macos-26-20260722-484daf4e/AppleColorEmoji-Linux.ttf"
+          curl -fL -o input/AppleColorEmoji-Windows.ttf \
+            "https://github.com/samuelngs/apple-emoji-ttf/releases/download/macos-26-20260722-484daf4e/AppleColorEmoji-Windows.ttf"
           ls -la input
 
+      - name: Inspect both fonts
+        run: python tools/inspect_web_font.py input/AppleColorEmoji-Linux.ttf input/AppleColorEmoji-Windows.ttf
+
       - name: Split into unicode-range chunks + CSS
-        run: python tools/build_web_chunks.py input/AppleColorEmoji.ttf output 1500
+        run: python tools/build_web_chunks.py input/AppleColorEmoji-Windows.ttf output 1500
 
       - name: List output
         run: ls -la output | head -40
