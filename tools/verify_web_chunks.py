@@ -122,7 +122,8 @@ def main() -> int:
     fallos: list[str] = []
     total_bitmap = 0
     for trozo in trozos:
-        if 0x200D not in trozo.cmap:
+        # El ZWJ solo hace falta donde viven las secuencias (la primera cara).
+        if trozo.reglas and 0x200D not in trozo.cmap:
             fallos.append(f"{trozo.path.name}: el ZWJ no esta en el cmap")
         for (primero, componentes), resultado in trozo.reglas.items():
             if resultado not in trozo.con_bitmap:
@@ -136,19 +137,17 @@ def main() -> int:
             f"strikes {trozo.strikes()}, {trozo.path.stat().st_size // 1024} KB"
         )
 
-    # Un codepoint no puede estar en dos trozos: el navegador eligeria otro y la
-    # secuencia se partiria. Los compartidos (ZWJ, VS16) si pueden estar en todos.
-    COMPARTIDOS = {0x200C, 0x200D, 0xFE0F}
-    duplos: dict[int, list[str]] = {}
-    for trozo in trozos:
-        for cp in trozo.cps - COMPARTIDOS:
-            duplos.setdefault(cp, []).append(trozo.path.name)
-    for cp, archivos in duplos.items():
-        fallos.append(
-            f"U+{cp:04X} esta en varios trozos: {', '.join(archivos)}"
-        )
-    if duplos:
-        print(f"Codepoints en mas de un trozo: {len(duplos)}")
+    # El navegador elige la cara POR CARACTER: la primera del CSS cuyo
+    # unicode-range lo incluye. Una secuencia se dibuja como un solo glifo solo si
+    # TODOS sus caracteres caen en la misma cara y esa cara tiene la ligadura. Que
+    # un codepoint este en dos rangos no es un fallo en si: gana el primero, y es
+    # justo el truco que usa la cara de secuencias para quedarse con el ZWJ, el
+    # VS16 y los tonos.
+    def cara_de(cp: int) -> "Trozo | None":
+        for trozo in trozos:
+            if trozo.cubre(cp):
+                return trozo
+        return None
 
     if args.catalog:
         data = json.loads(Path(args.catalog).read_text(encoding="utf-8"))
@@ -170,15 +169,26 @@ def main() -> int:
                 # proposito: la fuente del sistema los dibuja mejor.
                 delegadas += 1
                 continue
-            # Todos los codepoints de la secuencia tienen que caer en el mismo
-            # trozo: si no, el navegador la parte en dos textos y la ligadura no
-            # se aplica (el emoji sale como varios glifos sueltos).
-            candidatos = [t for t in trozos if all(t.cubre(cp) for cp in seq)]
-            if not candidatos:
+            # El VS16 no dibuja nada: si la secuencia es base + VS16, la dibuja
+            # el propio glifo de la base (no hace falta ligadura).
+            base = [cp for cp in seq if cp not in (0xFE0F, 0x200C)]
+            if len(base) == 1:
+                compuestas += 1
+                continue
+            # Las secuencias ZWJ con VS16 se dejan al sistema (enteras, otro estilo).
+            if 0x200D in seq and 0xFE0F in seq:
+                delegadas += 1
+                continue
+            # Las secuencias sin ZWJ (banderas, teclas, VS16) se dejan al sistema.
+            if 0x200D not in seq:
+                delegadas += 1
+                continue
+            caras = {cara_de(cp) for cp in base}
+            if None in caras or len(caras) != 1:
                 sin_componer.append(seq)
                 continue
-            trozo = candidatos[0]
-            nombres = [trozo.cmap.get(cp) for cp in seq]
+            trozo = caras.pop()
+            nombres = [trozo.cmap.get(cp) for cp in base]
             if any(n is None for n in nombres):
                 sin_componer.append(seq)
                 continue

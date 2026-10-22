@@ -16,21 +16,21 @@ What this script does:
    CBDT/CBLC with only the wanted strikes,
 4. writes the chunks as WOFF2 plus the matching ``@font-face`` CSS.
 
-Three details matter for the sequences to be drawn as a single glyph:
+Two details matter for the sequences to be drawn as a single glyph:
 
-* the ``unicode-range`` of a chunk only lists *its own* codepoints (plus the shared
-  ones), so a codepoint never resolves to two different chunks;
-* all the codepoints of a sequence live in the *same* chunk (they are grouped by
-  connected components of the sequence graph). Otherwise the browser splits the
-  sequence in two text runs, the ligature is never applied and the emoji is drawn
-  as several loose glyphs (or with the system emoji font);
+* the browser picks the face **per character**: the first ``@font-face`` of the CSS
+  whose ``unicode-range`` includes that character. The sequence is shaped as one
+  text run only when *every* character of it (the ZWJ included) resolves to the
+  same face. That is why all the sequences live together in a single "sequence
+  face" that the CSS declares **first**, and why the other chunks never claim
+  those codepoints;
 * a ligature whose composed glyph has no bitmap is dropped, otherwise the browser
   would draw an empty box.
 
-The skin tone modifiers are left out of the font on purpose: the browser can only
-use one font per codepoint and the tone is shared by every chunk, so the sequence
-(base + tone) would always be split. Without them the whole sequence is drawn by
-the system emoji font, which knows how to compose it.
+The skin tone modifiers are left out of every range on purpose: they are shared by
+hundreds of base emoji and the composed bitmaps would add several MB to the face.
+Without the tone in the font the browser draws the whole sequence with the system
+emoji font (one emoji, not two loose glyphs).
 
 The ligatures can be limited to the sequences that the app really uses (the emoji
 catalogue) with ``--catalog``; the rest of the sequences then keep using the system
@@ -519,72 +519,96 @@ def main() -> int:
         name: sum(len(png) for png in per_strike.values()) for name, per_strike in pngs.items()
     }
 
-    base_cps = sorted(
-        cp for cp in cmap if cp not in SHARED_CPS and cp not in TONE_CPS and cp >= 0x2000
-    )
-    print(f"Codepoints de emoji: {len(base_cps)}")
+    # A la cara de secuencias solo van las secuencias con ZWJ (familias,
+    # profesiones, parejas…). Las de VS16 (☀️, ⚽️) y las banderas se quedan fuera:
+    # cada una sumaria cientos de miles de bytes y no son el problema reportado.
+    zwj_name = cmap.get(0x200D)
+    rules = {key: result for key, result in rules.items() if zwj_name in key[1]}
+    print(f"Ligaduras con ZWJ: {len(rules)}")
 
-    chunks = plan_chunks(base_cps, cmap, rev_cmap, rules, glyph_cost, budget)
-    print(f"Trozos: {len(chunks)}")
+    # ------------------------------------------------------------------ #
+    # Cara de las secuencias (va PRIMERO en el CSS)
+    # ------------------------------------------------------------------ #
+    # El navegador elige la cara por caracter: la primera del CSS cuyo
+    # unicode-range lo incluye. Si el ZWJ, el VS16 o el tono caen en otra cara
+    # que el resto de la secuencia, el texto se parte en dos tramos y el GSUB
+    # nunca se aplica (el emoji acaba en la fuente del sistema, o sea, con otro
+    # estilo). Por eso todas las secuencias, los caracteres compartidos y los
+    # tonos van juntos en una sola cara, y los demas trozos no reclaman ninguno
+    # de esos codepoints.
+    seq_cps: set[int] = set(SHARED_CPS)
+    for first, components in rules:
+        for name in (first, *components):
+            seq_cps |= rev_cmap.get(name, set())
+
+    # Los tonos y el VS16 se quedan FUERA de todos los rangos a proposito:
+    # * los tonos son compartidos por cientos de bases y sus bitmaps compuestos
+    #   sumarian varios MB a la cara;
+    # * el VS16 lo necesitan las secuencias de base unica (❤️, ☀️, ⚽️): si la cara
+    #   de secuencias lo reclamara, el navegador partiria esas secuencias en dos
+    #   tramos y se perderia el emoji a color.
+    # Las secuencias ZWJ que llevan VS16 (❤️‍🔥, 🏳️‍🌈) quedan para la fuente del
+    # sistema: se ven enteras, aunque con otro estilo.
+    seq_cps -= TONE_CPS | {0xFE0F, 0x200C}
+    seq_cps = {cp for cp in seq_cps if cp in cmap}
+
+    seq_glyphs: set[str] = {cmap[cp] for cp in seq_cps if cp in cmap}
+    for first, components in rules:
+        seq_glyphs.update((first, *components))
+    for (first, components), result in rules.items():
+        if all(name in seq_glyphs for name in (first, *components)):
+            seq_glyphs.add(result)
+
+    base_cps = sorted(
+        cp
+        for cp in cmap
+        if cp >= 0x2000 and cp not in seq_cps and cp not in SHARED_CPS
+    )
+    print(f"Codepoints de la cara de secuencias: {len(seq_cps)}")
+    print(f"Codepoints de emoji sueltos: {len(base_cps)}")
+
+    # Los sueltos se reparten sin ligaduras: todas las secuencias ya tienen cara.
+    chunks = plan_chunks(base_cps, cmap, rev_cmap, {}, glyph_cost, budget)
+    print(f"Trozos de emoji sueltos: {len(chunks)}")
 
     css = [
         "/* Apple Color Emoji - generado desde AppleColorEmoji-Windows.ttf (build oficial) */",
         "",
     ]
     total = 0
-    for index, chunk in enumerate(chunks, start=1):
-        # Rango propio del trozo: sus codepoints y los compartidos. Es lo que ve el
-        # navegador. Los componentes de las secuencias se quedan en el cmap del
-        # trozo pero FUERA de su unicode-range: asi el navegador elige siempre este
-        # trozo como fuente principal de la secuencia y la ligadura se aplica (si el
-        # rango se solapara, otro trozo podria ganar y la secuencia se deshacia).
-        own_cps: set[int] = set(chunk) | SHARED_CPS
-        # Rango ampliado: incluye los componentes que necesitan las ligaduras de este
-        # trozo, para que el subconjunto contenga el cmap y los glifos que hacen falta.
-        ext_cps: set[int] = set(own_cps)
-        for cp in chunk:
-            name = cmap.get(cp)
-            if name and name in comp_map:
-                for comp_name in comp_map[name]:
-                    ext_cps |= rev_cmap.get(comp_name, set())
 
-        ext_names = {cmap[cp] for cp in ext_cps if cp in cmap}
-        active: set[str] = set(ext_names)
-        for cp in set(chunk) | SHARED_CPS:
-            name = cmap.get(cp)
-            if name:
-                active |= comp_map.get(name, set())
-
-        results = 0
-        for (first, components), result in rules.items():
-            names = [first, *components]
-            if all(name in ext_names for name in names):
-                active.add(result)
-                results += 1
-
-        data = build_chunk(source, ext_cps, active, pngs, ppems, metrics)
+    def escribir_trozo(index: int, cps: set[int], activos: set[str]) -> int:
+        data = build_chunk(source, cps, activos, pngs, ppems, metrics)
         filename = f"AppleColorEmoji[{index}].woff2"
         (outdir / filename).write_bytes(data)
-        total += len(data)
-        print(
-            f"Trozo {index}: {len(chunk)} cps (+{len(own_cps) - len(chunk)} compartidos), "
-            f"{results} ligaduras, {len(active)} glifos -> {filename} ({len(data) // 1024} KB)"
+        css.extend(
+            [
+                "@font-face {",
+                f"  font-family: '{FONT_FAMILY}';",
+                "  font-style: normal;",
+                "  font-weight: 400;",
+                "  font-display: swap;",
+                f"  src: url('./{filename}') format('woff2');",
+                f"  unicode-range: {unicode_range(cps)};",
+                "}",
+                "",
+            ]
         )
+        print(
+            f"Trozo {index}: {len(cps)} cps, {len(activos)} glifos, "
+            f"{len(data) // 1024} KB -> {filename}"
+        )
+        return len(data)
 
-        css += [
-            "@font-face {",
-            f"  font-family: '{FONT_FAMILY}';",
-            "  font-style: normal;",
-            "  font-weight: 400;",
-            "  font-display: swap;",
-            f"  src: url('./{filename}') format('woff2');",
-            f"  unicode-range: {unicode_range(own_cps)};",
-            "}",
-            "",
-        ]
+    total += escribir_trozo(1, seq_cps, seq_glyphs)
+    print(f"  ligaduras en la cara de secuencias: {len(rules)}")
+
+    for index, chunk in enumerate(chunks, start=2):
+        activos = {cmap[cp] for cp in chunk if cp in cmap}
+        total += escribir_trozo(index, set(chunk), activos)
 
     (outdir / "AppleColorEmoji.css").write_text("\n".join(css), encoding="utf-8")
-    print(f"{len(chunks)} trozos + AppleColorEmoji.css; total {total // 1024} KB")
+    print(f"{len(chunks) + 1} trozos + AppleColorEmoji.css; total {total // 1024} KB")
     return 0
 
 
