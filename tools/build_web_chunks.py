@@ -603,6 +603,9 @@ def main() -> int:
 
     # Los sueltos se reparten sin ligaduras: todas las secuencias ya tienen cara.
     order = catalog_order(Path(args.catalog)) if args.catalog and args.orden_catalogo else None
+    if order:
+        # Sin bitmap el navegador dibujaria un hueco con esta fuente: esos codepoints los dibuja el sistema.
+        base_cps = [cp for cp in base_cps if cmap.get(cp) in pngs]
     chunks = plan_chunks(base_cps, cmap, rev_cmap, {}, glyph_cost, budget, order)
     print(f"Trozos de emoji sueltos: {len(chunks)}")
 
