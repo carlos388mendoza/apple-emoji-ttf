@@ -206,6 +206,7 @@ def plan_chunks(
     rules: dict[tuple[str, tuple[str, ...]], str],
     glyph_cost: dict[str, int],
     budget_bytes: int,
+    order: dict[int, int] | None = None,
 ) -> list[list[int]]:
     """Agrupa los codepoints en trozos disjuntos.
 
@@ -273,7 +274,14 @@ def plan_chunks(
 
     # Los grupos grandes (familias, banderas) van solos; los sueltos se rellenan
     # hasta el presupuesto.
-    unidades.sort(key=lambda u: -u[2])
+    if order:
+        # En el orden del catalogo (el del selector de emojis): una pantalla del
+        # selector cae en uno o dos trozos en lugar de tocarlos todos. Lo que no
+        # esta en el catalogo va al final.
+        fin = len(order) + 1
+        unidades.sort(key=lambda u: min(order.get(cp, fin) for cp in u[0]))
+    else:
+        unidades.sort(key=lambda u: -u[2])
     bitmap_budget = max(budget_bytes - OVERHEAD_ESTIMATE, 64 * 1024)
 
     chunks: list[list[int]] = []
@@ -291,8 +299,22 @@ def plan_chunks(
 
     for chunk in chunks:
         chunk.sort()
-    chunks.sort(key=lambda c: c[0])
+    if not order:
+        chunks.sort(key=lambda c: c[0])
     return chunks
+
+
+def catalog_order(path: Path) -> dict[int, int]:
+    """Posicion de cada codepoint en el catalogo (la primera vez que aparece)."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    items = data.get("emojis", data) if isinstance(data, dict) else data
+    order: dict[int, int] = {}
+    for item in items:
+        value = item[0] if isinstance(item, list) else item
+        if isinstance(value, str):
+            for ch in value:
+                order.setdefault(ord(ch), len(order))
+    return order
 
 
 # --------------------------------------------------------------------------- #
@@ -444,6 +466,18 @@ def main() -> int:
     parser.add_argument("--ppem", default="96", help="strikes a incluir (por defecto 96)")
     parser.add_argument("--budget-kb", type=int, default=700, help="tamano objetivo por trozo")
     parser.add_argument("--catalog", default="", help="catalogo de emojis para podar ligaduras")
+    parser.add_argument(
+        "--orden-catalogo",
+        action="store_true",
+        help="repartir los sueltos en el orden del catalogo (el del selector) y no por tamano",
+    )
+    parser.add_argument(
+        "--sueltos",
+        type=int,
+        default=0,
+        help="ademas, N trozos con los emojis sueltos de la cara de secuencias, sin ligaduras, "
+        "para la familia 'Apple Color Emoji Sueltos' (iconos de un solo emoji)",
+    )
     args = parser.parse_args()
 
     source = Path(args.source)
@@ -568,7 +602,8 @@ def main() -> int:
     print(f"Codepoints de emoji sueltos: {len(base_cps)}")
 
     # Los sueltos se reparten sin ligaduras: todas las secuencias ya tienen cara.
-    chunks = plan_chunks(base_cps, cmap, rev_cmap, {}, glyph_cost, budget)
+    order = catalog_order(Path(args.catalog)) if args.catalog and args.orden_catalogo else None
+    chunks = plan_chunks(base_cps, cmap, rev_cmap, {}, glyph_cost, budget, order)
     print(f"Trozos de emoji sueltos: {len(chunks)}")
 
     css = [
@@ -577,10 +612,26 @@ def main() -> int:
     ]
     total = 0
 
-    def escribir_trozo(index: int, cps: set[int], activos: set[str]) -> int:
+    def face(family: str, filename: str, cps: set[int]) -> list[str]:
+        return [
+            "@font-face {",
+            f"  font-family: '{family}';",
+            "  font-style: normal;",
+            "  font-weight: 400;",
+            "  font-display: swap;",
+            f"  src: url('./{filename}') format('woff2');",
+            f"  unicode-range: {unicode_range(cps)};",
+            "}",
+            "",
+        ]
+
+    def escribir_trozo(index: int, cps: set[int], activos: set[str], filename: str = "") -> int:
         data = build_chunk(source, cps, activos, pngs, ppems, metrics)
-        filename = f"AppleColorEmoji[{index}].woff2"
+        filename = filename or f"AppleColorEmoji[{index}].woff2"
         (outdir / filename).write_bytes(data)
+        if filename.startswith("AppleColorEmoji-sueltos"):
+            print(f"Sueltos {index}: {len(cps)} cps, {len(data) // 1024} KB -> {filename}")
+            return len(data)
         css.extend(
             [
                 "@font-face {",
@@ -606,6 +657,29 @@ def main() -> int:
     for index, chunk in enumerate(chunks, start=2):
         activos = {cmap[cp] for cp in chunk if cp in cmap}
         total += escribir_trozo(index, set(chunk), activos)
+
+    if args.sueltos:
+        # Familia "Apple Color Emoji Sueltos": para los iconos de UN solo emoji (sin ZWJ). Reusa los mismos
+        # trozos de sueltos y suma los emojis sueltos que viven en la cara de secuencias (🔥, 💻, 🚀, 🙂…),
+        # repartidos en N trozos sin ligaduras. Asi un icono 🔥 no obliga a bajar toda la cara de secuencias.
+        # El texto libre sigue usando 'Apple Color Emoji', que si compone las secuencias.
+        solos = sorted(cp for cp in seq_cps if cp not in SHARED_CPS)
+        if order:
+            fin = len(order) + 1
+            solos.sort(key=lambda cp: order.get(cp, fin))
+        n = max(1, args.sueltos)
+        grupos_solos = [solos[i * len(solos) // n : (i + 1) * len(solos) // n] for i in range(n)]
+        familia = f"{FONT_FAMILY} Sueltos"
+        css.append(f"/* {familia}: iconos de un solo emoji (sin ZWJ); reusa los trozos de arriba. */")
+        css.append("")
+        for i, grupo in enumerate(grupos_solos, start=1):
+            if not grupo:
+                continue
+            nombre = f"AppleColorEmoji-sueltos{i}.woff2"
+            total += escribir_trozo(i, set(grupo), {cmap[cp] for cp in grupo}, nombre)
+            css.extend(face(familia, nombre, set(grupo)))
+        for index, chunk in enumerate(chunks, start=2):
+            css.extend(face(familia, f"AppleColorEmoji[{index}].woff2", set(chunk)))
 
     (outdir / "AppleColorEmoji.css").write_text("\n".join(css), encoding="utf-8")
     print(f"{len(chunks) + 1} trozos + AppleColorEmoji.css; total {total // 1024} KB")

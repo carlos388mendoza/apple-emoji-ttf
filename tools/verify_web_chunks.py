@@ -110,7 +110,18 @@ def main() -> int:
 
     carpeta = Path(args.carpeta)
     css = (carpeta / "AppleColorEmoji.css").read_text(encoding="utf-8")
+    # La familia "Apple Color Emoji Sueltos" (iconos de un solo emoji) reusa los trozos: se revisa aparte.
+    css, _, sueltos = css.partition("/* Apple Color Emoji Sueltos")
     bloques = RUTA_CSS.findall(css)
+    for archivo, rango in RUTA_CSS.findall(sueltos):
+        trozo = Trozo(carpeta / archivo, rango)
+        faltan = [cp for cp in trozo.cps if cp not in trozo.cmap]
+        if faltan:
+            print(f"Sueltos: {archivo} no tiene {len(faltan)} codepoints de su rango", file=sys.stderr)
+            return 1
+        if not trozo.con_bitmap:
+            print(f"Sueltos: {archivo} no tiene bitmaps", file=sys.stderr)
+            return 1
     if not bloques:
         print("El CSS no tiene bloques @font-face", file=sys.stderr)
         return 1
