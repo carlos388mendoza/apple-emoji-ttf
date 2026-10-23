@@ -663,7 +663,8 @@ def main() -> int:
         # trozos de sueltos y suma los emojis sueltos que viven en la cara de secuencias (🔥, 💻, 🚀, 🙂…),
         # repartidos en N trozos sin ligaduras. Asi un icono 🔥 no obliga a bajar toda la cara de secuencias.
         # El texto libre sigue usando 'Apple Color Emoji', que si compone las secuencias.
-        solos = sorted(cp for cp in seq_cps if cp not in SHARED_CPS)
+        # Solo los que tienen dibujo propio (♀, ♂ o ⚕ solos no lo tienen: los dibuja el sistema).
+        solos = sorted(cp for cp in seq_cps if cp not in SHARED_CPS and cmap.get(cp) in pngs)
         if order:
             fin = len(order) + 1
             solos.sort(key=lambda cp: order.get(cp, fin))
